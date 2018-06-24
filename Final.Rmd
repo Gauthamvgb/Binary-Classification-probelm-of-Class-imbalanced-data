@@ -1,0 +1,367 @@
+---
+title: "Cute - 3"
+output: html_document
+---
+##Installing Required Packages
+
+```{r}
+library("randomForest")
+library("caret")
+library("DMwR")
+library("car")
+library("MASS")
+library("party")
+library("xgboost")
+library("class")
+library("methods")
+library("corrplot")
+````
+
+##Reading Table & Understanding
+
+```{r}
+given <- read.csv("D:\\INSOFE\\CUTe\\CUTE - 3\\train.csv")
+str(given)
+summary(given)
+head(given)
+tail(given)
+````
+
+##Modying Columns - Initial Level
+
+```{r}
+given <- given[,-1] #Removing ID column
+given$target <- as.factor(given$target)
+````
+
+##Identifying NULL Values
+
+```{r}
+sort(colSums(is.na(given)),decreasing = T)
+given <- given[,!colnames(given) %in% c("Attr37")] #Removing Col Attr37 has it has 50% Null
+given <- given[,!colnames(given) %in% c("Attr10","Attr17","Attr21","Attr24","Attr29","Attr35","Attr36","Attr39","Attr45","Attr46","Attr62")] #Removing by reduntant columns
+````
+
+##Analysing Target
+
+```{r}
+table(given$target)
+prop.table(table(given$target))
+#Only 5% of 1 is present. Imbalanced dataset
+````
+
+#SMOTE
+
+```{r}
+given_smote = SMOTE(target~ ., given,  perc.over=200,k = 5)
+table(given_smote$target)
+prop.table(table(given_smote$target))
+````
+
+##Partioning
+
+```{r}
+partition <- createDataPartition(y = given$target,p = 0.7, list = F)
+validation <- given[-partition,]
+train <- given[partition,]
+rm(partition)
+
+partition_smo <- createDataPartition(y = given_smote$target,p = 0.7, list = F)
+validation_smo <- given_smote[-partition_smo,]
+train_smo <- given_smote[partition_smo,]
+rm(partition_smo)
+````
+
+##Imputing Values
+
+```{r}
+train_imp = centralImputation(train)
+validation_imp = centralImputation(validation)
+train_imp <- knnImputation(train,k = 3,scale = T)
+validation_imp <- knnImputation(validation,k=3,scale = T,distData = train_imp)
+rm(train)
+rm(validation)
+
+train_smo_imp = centralImputation(train_smo)
+validation_smo_imp = centralImputation(validation_smo)
+train_smo_imp <- knnImputation(train_smo,k = 3,scale = T)
+validation_smo_imp <- knnImputation(validation_smo,k=3,scale = T,distData = train_smo_imp)
+rm(train_smo)
+rm(validation_smo)
+````
+
+##Feature Selection
+
+#Method 1: Run Correlation
+
+```{r}
+corr_smo <- cor(train_smo_imp[,setdiff(names(train_smo_imp), "target")])
+highlyCorrelated_smo <- sort(findCorrelation(corr_smo, cutoff=0.8))
+train_smo_cor <- cbind(train_smo_imp[,highlyCorrelated_smo],"target" = train_smo_imp$target)
+validate_smo_cor <- cbind(validation_smo_imp[,highlyCorrelated_smo],"target" = validation_smo_imp$target)
+
+
+corr <- cor(train_imp[,setdiff(names(train_imp), "target")])
+highlyCorrelated <- sort(findCorrelation(corr, cutoff=0.8))
+train_cor <- cbind(train_imp[,highlyCorrelated],"target" = train_imp$target)
+validate_cor <- cbind(validation_imp[,highlyCorrelated],"target" = validation_imp$target)
+
+````
+
+#Method 2: Run Random Forest
+
+```{r}
+train_RF <- randomForest(y=train_imp$target,x=train_imp , ntree = 150,importance = T)
+
+varImp(train_RF,scale = T)
+
+
+````
+
+#Method 3: Run PCA
+
+```{r}
+
+#With SMOTE
+train_smo_pca <- train_smo_imp[,setdiff(names(train_smo_imp), "target")]
+train_smo_pca <- prcomp(train_smo_pca,scale. = T)
+vari_smo <- ((train_smo_pca$sdev^2)/sum(train_smo_pca$sdev^2)) #Calculatin Variance from StdDev
+plot(cumsum(vari_smo), xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     type = "b")
+trained_smo_pca <- data.frame("target" = train_smo_imp$target , train_smo_pca$x)
+trained_smo_pca <- trained_smo_pca[,1:26]
+validation_smo_pca <- as.data.frame(predict(train_smo_pca,validation_smo_imp))
+validation_smo_pca <- validation_smo_pca[,1:26]
+validation_smo_pca <- cbind(validation_smo_pca,"target" = validation_smo_imp$target)
+
+#W/o SMOTE
+
+train_pca <- train_imp[,setdiff(names(train_imp), "target")]
+train_pca <- prcomp(train_pca,scale. = T)
+vari <- ((train_pca$sdev^2)/sum(train_pca$sdev^2)) #Calculatin Variance from StdDev
+plot(cumsum(vari), xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     type = "b")
+trained_pca <- data.frame("target" = train_imp$target , train_pca$x)
+trained_pca <- trained_pca[,1:28]
+validation_pca <- as.data.frame(predict(train_pca,validation_imp))
+validation_pca <- validation_pca[,1:28]
+validation_pca <- cbind(validation_pca,"target" = validation_imp$target)
+
+````
+
+##Modelling
+
+#Model - Random Forest
+
+```{r}
+#PCA
+train_pca_rf <- randomForest(target~. ,trained_pca,ntree=120)
+pred_Train_pca_rf = predict(train_pca_rf,trained_pca[,setdiff(names(trained_pca), "target")],type="response",norm.votes=TRUE)
+cm_Train_pca = confusionMatrix(trained_pca$target, pred_Train_pca_rf)
+validate_pca_rf <- predict(train_pca_rf,validation_pca[,setdiff(names(validation_pca), "target")],type="response",norm.votes=TRUE)
+cm_test_pca = confusionMatrix(validation_pca$target,validate_pca_rf)
+
+
+#With SMOTE - PCA
+train_smo_pca_rf <- randomForest(target~. ,trained_smo_pca,ntree=120)
+pred_Train_smo_rf = predict(train_smo_pca_rf,trained_smo_pca[,setdiff(names(trained_smo_pca), "target")],type="response",norm.votes=TRUE)
+cm_Train_smo = confusionMatrix(trained_smo_pca$target, pred_Train_smo_rf)
+validate_smo_pca_rf <- predict(train_smo_pca_rf,validation_smo_pca[,setdiff(names(validation_smo_pca), "target")],type="response",norm.votes=TRUE)
+cm_test_smo = confusionMatrix(validation_smo_pca$target,validate_smo_pca_rf)
+
+#With Cor 
+train_cor_rf <- randomForest(target~. ,train_cor,ntree=120)
+pred_Train_cor_rf = predict(train_cor_rf,train_cor[,setdiff(names(train_cor), "target")],type="response",norm.votes=TRUE)
+cm_Train_cor = confusionMatrix(train_cor$target, pred_Train_cor_rf)
+pred_validate_cor_rf <- predict(train_cor_rf,validate_cor[,setdiff(names(validate_cor), "target")],type="response",norm.votes=TRUE)
+cm_test_cor = confusionMatrix(validate_cor$target,pred_validate_cor_rf)
+
+#With SMOTE - Cor
+train_smo_cor_rf <- randomForest(target~. ,train_smo_cor,ntree=120)
+pred_Train_smo_cor_rf = predict(train_smo_cor_rf,train_smo_cor[,setdiff(names(train_smo_cor), "target")],type="response",norm.votes=TRUE)
+cm_Train_pca = confusionMatrix(train_smo_cor$target, pred_Train_smo_cor_rf)
+pred_validate_smo_cor_rf <- predict(train_smo_cor_rf,validate_smo_cor[,setdiff(names(validate_smo_cor), "target")],type="response",norm.votes=TRUE)
+cm_test_pca = confusionMatrix(validate_smo_cor$target,pred_validate_smo_cor_rf)
+
+````
+
+#Model - KNN
+
+```{r}
+set.seed(123)
+ctrl <- trainControl(method="repeatedcv",repeats = 3)
+knnFit_pca <- train(target ~ ., data = trained_pca, 
+                method = "knn", trControl = ctrl,
+                preProcess = c("center","scale"))
+
+pred_pca <- predict(knnFit_pca,validation_pca)
+cm_pca_knn <- confusionMatrix(pred_pca, validation_pca$target)
+
+knnFit_smo_pca <- train(target ~ ., data = trained_smo_pca, 
+                method = "knn", trControl = ctrl,
+                preProcess = c("center","scale"))
+
+pred_smo_pca <- predict(knnFit_smo_pca,validation_smo_pca)
+cm_smo_pca_knn <- confusionMatrix(pred_smo_pca, validation_smo_pca$target)
+
+knnFit_cor <- train(target ~ ., data = train_cor, 
+                method = "knn", trControl = ctrl,
+                preProcess = c("center","scale"))
+
+pred_cor <- predict(knnFit_cor,validate_cor)
+cm_cor_knn <- confusionMatrix(pred_cor, validate_cor$target)
+
+knnFit_smo_cor <- train(target ~ ., data = train_smo_cor, 
+                method = "knn", trControl = ctrl,
+                preProcess = c("center","scale"))
+
+pred_smo_cor <- predict(knnFit_smo_cor,validate_smo_cor)
+cm_smo_cor_knn <- confusionMatrix(pred_smo_cor, validate_smo_cor$target)
+
+````
+
+#Model - XGBoost (Caret)
+
+```{r}
+sampling_strategy <- trainControl(method = "repeatedcv", number = 5, repeats = 2, verboseIter = F, allowParallel = T)
+
+param_grid <- expand.grid(.nrounds = 20, .max_depth = c(2, 4, 6), .eta = c(0.1, 0.3),
+                          .gamma = c(0.6, 0.5, 0.3), .colsample_bytree = c(0.6, 0.4),
+                          .min_child_weight = 1, .subsample = c(0.5, 0.6, 0.9)
+                          )
+rf_var <- c("Attr27",
+"Attr56",
+"Attr9",
+"Attr58",
+"Attr34",
+"Attr6",
+"Attr42",
+"Attr22",
+"Attr30",
+"Attr25",
+"Attr11",
+"Attr16",
+"Attr26",
+"Attr23",
+"Attr64",
+"Attr1",
+"Attr8",
+"Attr5",
+"Attr13",
+"Attr12",
+"Attr4",
+"Attr48",
+"Attr41",
+"Attr55",
+"Attr38",
+"Attr31",
+"Attr19",
+"Attr59",
+"Attr49",
+"Attr18",
+"Attr7",
+"Attr51",
+"Attr47",
+"Attr2",
+"Attr32",
+"Attr14",
+"Attr40",
+"Attr43"
+)
+xgb_tuned_model <- train(x = train_imp[ , rf_var], 
+                         y = train_imp[ , names(train_imp) %in% c("target")], 
+                         method = "xgbTree",scale = T,
+                         trControl = sampling_strategy,
+                         tuneGrid = param_grid)
+
+tuned_params_preds <- predict(xgb_tuned_model, train_imp[ ,rf_var])
+confusionMatrix(tuned_params_preds, train_imp$target)
+
+tuned_params_preds <- predict(xgb_tuned_model, validation_imp[ ,rf_var])
+confusionMatrix(tuned_params_preds, validation_imp$target)
+````
+
+#XGBoost - Train
+
+```{r}
+label <- as.numeric(given[[64]])
+data <- as.matrix(given[1:63])
+weights <- ifelse(given$target == 1,
+                        (1/table(given$target)[1]) * 0.3,
+                        (1/table(given$target)[2]) * 0.7)
+sumwpos <- sum(weights * (label==1.0))
+sumwneg <- sum(weights * (label==0.0))
+mat_train <- xgb.DMatrix(data, label = label, weight = weights, missing = NA)
+param <- list("objective" = "binary:logitraw",
+              "scale_pos_weight" = sumwneg / sumwpos,
+              "bst:eta" = 0.15,
+              "bst:max_depth" = 6,
+              "eval_metric" = "auc")
+watchlist <- list("train" = mat_train)
+nround = 200
+bst = xgb.train(param, mat_train, nround, watchlist )
+pred_train_xg <- predict(bst,data)
+pred12<-ifelse(pred_train_xg > 0.6,1,0)
+u <- union(pred12,given$target)
+t1 <- table(factor(pred12,u),factor(given$target,u))
+confusionMatrix(t1)
+
+````
+
+# On Test Data
+
+```{r}
+test <- read.csv("D:\\INSOFE\\CUTe\\CUTE - 3\\test.csv")
+str(test)
+sum(is.na(test))
+test1 <- test
+test <- test[,-1]
+test <- test[,!colnames(test) %in% c("Attr37")]
+test <- test[,!colnames(test)%in% c("Attr10","Attr17","Attr21","Attr24","Attr29","Attr35","Attr36","Attr39","Attr45","Attr46","Attr62")]
+test_imp <- knnImputation(test,k=3,scale = T,distData = train_imp)
+test_imp <-  centralImputation(test)
+test_pca <- as.data.frame(predict(train_pca,test_imp))
+test_pca <- test_pca[,1:28]
+
+test_smo_pca <- as.data.frame(predict(train_smo_pca,test_imp))
+test_smo_pca <- test_pca[,1:26]
+
+test_cor <- test_imp[,highlyCorrelated]
+test_smo_cor <- test_imp[,highlyCorrelated_smo]
+
+test_rf <- test_imp[ , rf_var]
+
+pred_test_pca_rf = predict(train_pca_rf,test_pca,type="response",norm.votes=TRUE)
+final_pca_rf = cbind("ID" = test1$ID,"prediction" = pred_test_pca_rf)
+
+pred_test_smo_rf = predict(train_smo_pca_rf,test_smo_pca,type="response",norm.votes=TRUE)
+final_pca_smo_rf = cbind("ID" = test1$ID,"prediction" = pred_test_smo_rf)
+
+pred_test_cor_rf = predict(train_cor_rf,test_cor,type="response",norm.votes=TRUE)
+final_cor_rf = cbind("ID" = test1$ID,"prediction" = pred_test_cor_rf)
+
+pred_test_smo_cor_rf = predict(train_smo_cor_rf,test_smo_cor,type="response",norm.votes=TRUE)
+final_smo_cor_rf = cbind("ID" = test1$ID,"prediction" = pred_test_smo_cor_rf)
+
+pred_pca_knn <- predict(knnFit_pca,test_pca)
+final_pca_knn = cbind("ID" = test1$ID,"prediction" = pred_pca_knn)
+
+pred_smo_pca_knn <- predict(knnFit_smo_pca,test_smo_pca)
+final_smo_pca_knn = cbind("ID" = test1$ID,"prediction" = pred_smo_pca_knn)
+
+pred_cor_knn <- predict(knnFit_cor,test_cor)
+final_cor_knn = cbind("ID" = test1$ID,"prediction" = pred_cor_knn)
+
+pred_smo_cor_knn <- predict(knnFit_smo_cor,test_cor)
+final_smo_cor_knn = cbind("ID" = test1$ID,"prediction" = pred_smo_cor_knn)
+
+pred_xgb_car <- predict(xgb_tuned_model, test_rf)
+final_xgb_car = cbind("ID" = test1$ID,"prediction" = pred_xgb_car)
+
+pred_test_xg <- predict(bst,test1[,-1])
+pred12<-ifelse(pred_test_xg > 0.6,1,0)
+final_xgb_mat = cbind("ID" = test1$ID,"prediction" = pred12)
+
+````
